@@ -1,0 +1,681 @@
+#!/usr/bin/env python3
+"""
+视频字幕批量生成工具
+支持单个文件或文件夹批量处理
+流程：1. Whisper 转录 -> 2. 翻译成中文 -> 3. 生成字幕
+
+进度监控功能：
+- 转录阶段：每10秒显示心跳，确认程序仍在运行
+- 翻译阶段：每翻译5个片段或每2秒更新进度
+- 生成字幕阶段：实时显示进度条和预计剩余时间
+- 所有阶段都显示已用时间和预计剩余时间
+
+语言支持：
+- 英文 (English)
+- 日文 (Japanese)
+- 自动检测 (Auto)
+"""
+
+import whisper
+import os
+import sys
+from pathlib import Path
+import json
+import time
+from datetime import datetime, timedelta
+
+
+def format_timestamp(seconds):
+    """将秒数格式化为 SRT 时间戳格式"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def transcribe_video(video_path, model_size="small", language=None):
+    """
+    使用 Whisper 转录视频
+    
+    参数:
+        video_path: 视频文件路径
+        model_size: 模型大小
+        language: 语言代码 (None=自动检测, "English", "Japanese" 等)
+    
+    返回:
+        Whisper 转录结果
+    """
+    print("=" * 60)
+    print(f"视频文件: {video_path}")
+    print(f"文件大小: {os.path.getsize(video_path) / (1024**3):.2f} GB")
+    print(f"模型大小: {model_size}")
+    if language:
+        print(f"指定语言: {language}")
+    else:
+        print("语言检测: 自动")
+    print("=" * 60)
+    
+    # 加载模型
+    print(f"\n正在加载 Whisper 模型: {model_size}...")
+    model = whisper.load_model(model_size)
+    print("✓ 模型加载完成")
+    
+    # 转录视频
+    print(f"\n开始转录音频...")
+    print("注意: 处理时间取决于视频长度和模型大小，请耐心等待...")
+    print("=" * 60)
+    
+    # 添加进度监控
+    start_time = time.time()
+    last_heartbeat_time = start_time
+    
+    # 由于 Whisper 的 transcribe 不支持进度回调，我们使用多线程来显示心跳
+    import threading
+    
+    stop_heartbeat = threading.Event()
+    
+    def heartbeat():
+        """心跳线程，定期显示程序仍在运行"""
+        while not stop_heartbeat.is_set():
+            time.sleep(10)  # 每10秒更新一次
+            elapsed = time.time() - start_time
+            print(f"\r[心跳] 程序运行中... 已用时: {format_time(elapsed)} | 正在处理音频...", end='', flush=True)
+    
+    # 启动心跳线程
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+    
+    # 调用 transcribe
+    print(f"\n正在处理...")
+    
+    # 准备转录参数
+    transcribe_kwargs = {
+        "word_timestamps": True
+    }
+    if language:
+        transcribe_kwargs["language"] = language
+    
+    result = model.transcribe(video_path, **transcribe_kwargs)
+    
+    # 停止心跳线程
+    stop_heartbeat.set()
+    heartbeat_thread.join(timeout=1)
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ 转录完成! (用时: {format_time(elapsed)})")
+    print(f"检测到的语言: {result['language']}")
+    print(f"总时长: {result['segments'][-1]['end']:.2f} 秒")
+    print(f"分段数量: {len(result['segments'])}")
+    
+    return result
+
+
+def format_time(seconds):
+    """格式化时间显示"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs}s"
+    else:
+        return f"{secs}s"
+
+
+# 全局变量用于翻译进度统计
+_translation_count = 0
+_translation_total = 0
+_translation_start_time = 0
+_translation_last_update = 0
+
+def translate_to_chinese(text, translator="google", source_lang="en"):
+    """
+    将文本翻译成中文
+    
+    参数:
+        text: 源文本
+        translator: 翻译器类型 ("google", "baidu", "manual")
+        source_lang: 源语言代码 ("en", "ja" 等)
+    
+    返回:
+        中文文本
+    """
+    global _translation_count, _translation_total, _translation_start_time, _translation_last_update
+    
+    if translator == "manual":
+        # 手动翻译 - 返回原文，用户可以手动翻译
+        return text
+    elif translator == "google":
+        # 使用 Google Translate (需要安装 googletrans)
+        try:
+            from googletrans import Translator
+            translator_obj = Translator()
+            
+            # 显示翻译进度
+            _translation_count += 1
+            current_time = time.time()
+            
+            # 每翻译5个片段或每2秒更新一次进度
+            if _translation_count % 5 == 0 or (current_time - _translation_last_update >= 2):
+                elapsed = current_time - _translation_start_time
+                if _translation_total > 0:
+                    progress = _translation_count / _translation_total
+                    estimated_total = elapsed / progress if progress > 0 else 0
+                    remaining = estimated_total - elapsed
+                    print(f"\r翻译中: {_translation_count}/{_translation_total} ({progress*100:.1f}%) | 已用时: {format_time(elapsed)} | 预计剩余: {format_time(remaining)}", end='', flush=True)
+                _translation_last_update = current_time
+            
+            result = translator_obj.translate(text, src=source_lang, dest='zh-CN')
+            return result.text
+        except ImportError:
+            print("\n⚠️  警告: googletrans 未安装")
+            print("请运行: .venv/bin/pip install googletrans==4.0.0-rc1")
+            print("将返回原文，您可以稍后手动翻译")
+            return text
+        except Exception as e:
+            print(f"\n⚠️  翻译失败: {e}")
+            return text
+    else:
+        return text
+
+
+def generate_bilingual_subtitle(result, output_path, translator="google", source_lang="en"):
+    """
+    生成双语字幕（源语言 + 中文）
+    
+    参数:
+        result: Whisper 转录结果
+        output_path: 输出文件路径
+        translator: 翻译器类型
+        source_lang: 源语言代码
+    """
+    global _translation_count, _translation_total, _translation_start_time, _translation_last_update
+    
+    print(f"\n正在生成双语字幕...")
+    print("=" * 60)
+    
+    total_segments = len(result['segments'])
+    start_time = time.time()
+    last_update_time = start_time
+    
+    # 初始化翻译进度统计
+    _translation_count = 0
+    _translation_total = total_segments
+    _translation_start_time = start_time
+    _translation_last_update = start_time
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(result['segments'], 1):
+            start = format_timestamp(segment['start'])
+            end = format_timestamp(segment['end'])
+            source_text = segment['text'].strip()
+            
+            # 翻译成中文
+            chinese_text = translate_to_chinese(source_text, translator, source_lang)
+            
+            # 写入双语字幕
+            f.write(f"{i}\n{start} --> {end}\n")
+            f.write(f"{source_text}\n")
+            f.write(f"{chinese_text}\n\n")
+            
+            # 进度显示已经在 translate_to_chinese 函数中处理
+            pass
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ 双语字幕已保存: {output_path} (用时: {format_time(elapsed)})")
+
+
+def generate_chinese_only_subtitle(result, output_path, translator="google", source_lang="en"):
+    """
+    生成纯中文字幕
+    
+    参数:
+        result: Whisper 转录结果
+        output_path: 输出文件路径
+        translator: 翻译器类型
+        source_lang: 源语言代码
+    """
+    global _translation_count, _translation_total, _translation_start_time, _translation_last_update
+    
+    print(f"\n正在生成中文字幕...")
+    print("=" * 60)
+    
+    total_segments = len(result['segments'])
+    start_time = time.time()
+    last_update_time = start_time
+    
+    # 初始化翻译进度统计
+    _translation_count = 0
+    _translation_total = total_segments
+    _translation_start_time = start_time
+    _translation_last_update = start_time
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(result['segments'], 1):
+            start = format_timestamp(segment['start'])
+            end = format_timestamp(segment['end'])
+            source_text = segment['text'].strip()
+            
+            # 翻译成中文
+            chinese_text = translate_to_chinese(source_text, translator, source_lang)
+            
+            # 写入中文字幕
+            f.write(f"{i}\n{start} --> {end}\n")
+            f.write(f"{chinese_text}\n\n")
+            
+            # 进度显示已经在 translate_to_chinese 函数中处理
+            pass
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ 中文字幕已保存: {output_path} (用时: {format_time(elapsed)})")
+
+
+def generate_english_subtitle(result, output_path):
+    """
+    生成纯英文字幕
+    
+    参数:
+        result: Whisper 转录结果
+        output_path: 输出文件路径
+    """
+    print(f"\n正在生成英文字幕...")
+    print("=" * 60)
+    
+    total_segments = len(result['segments'])
+    start_time = time.time()
+    last_update_time = start_time
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(result['segments'], 1):
+            start = format_timestamp(segment['start'])
+            end = format_timestamp(segment['end'])
+            text = segment['text'].strip()
+            f.write(f"{i}\n{start} --> {end}\n{text}\n\n")
+            
+            # 显示进度（每处理100个片段或每2秒更新一次）
+            current_time = time.time()
+            if i % 100 == 0 or (current_time - last_update_time >= 2):
+                progress = i / total_segments
+                elapsed = current_time - start_time
+                if progress > 0:
+                    estimated_total = elapsed / progress
+                    remaining = estimated_total - elapsed
+                    print(f"\r生成进度: {i}/{total_segments} ({progress*100:.1f}%) | 已用时: {format_time(elapsed)} | 预计剩余: {format_time(remaining)} | {'█' * int(progress * 30):<30}", end='', flush=True)
+                last_update_time = current_time
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ 英文字幕已保存: {output_path} (用时: {format_time(elapsed)})")
+
+
+def save_transcript(result, output_path):
+    """保存转录文本"""
+    print(f"\n正在保存转录文本...")
+    print("=" * 60)
+    
+    total_segments = len(result['segments'])
+    start_time = time.time()
+    last_update_time = start_time
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        for i, segment in enumerate(result['segments'], 1):
+            start = segment['start']
+            end = segment['end']
+            text = segment['text'].strip()
+            f.write(f"[{start:.2f}s - {end:.2f}s] {text}\n")
+            
+            # 显示进度（每处理100个片段或每2秒更新一次）
+            current_time = time.time()
+            if i % 100 == 0 or (current_time - last_update_time >= 2):
+                progress = i / total_segments
+                elapsed = current_time - start_time
+                if progress > 0:
+                    estimated_total = elapsed / progress
+                    remaining = estimated_total - elapsed
+                    print(f"\r保存进度: {i}/{total_segments} ({progress*100:.1f}%) | 已用时: {format_time(elapsed)} | 预计剩余: {format_time(remaining)} | {'█' * int(progress * 30):<30}", end='', flush=True)
+                last_update_time = current_time
+    
+    elapsed = time.time() - start_time
+    print(f"\n✓ 转录文本已保存: {output_path} (用时: {format_time(elapsed)})")
+
+
+def process_video_to_chinese_subtitle(
+    video_path,
+    model_size="small",
+    output_dir=None,
+    subtitle_type="bilingual",
+    translator="google",
+    language=None
+):
+    """
+    处理视频，生成中文字幕
+    
+    参数:
+        video_path: 视频文件路径
+        model_size: 模型大小
+        output_dir: 输出目录
+        subtitle_type: 字幕类型 ("bilingual" 双语, "chinese" 纯中文, "english" 纯英文)
+        translator: 翻译器类型 ("google", "manual")
+        language: 源语言代码 (None=自动检测, "English", "Japanese" 等)
+    """
+    
+    # 检查文件是否存在
+    if not os.path.exists(video_path):
+        print(f"✗ 错误: 文件不存在: {video_path}")
+        return None
+    
+    # 设置输出目录
+    if output_dir is None:
+        output_dir = os.path.dirname(video_path)
+    
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 获取文件名（不含扩展名）
+    base_name = os.path.splitext(os.path.basename(video_path))[0]
+    
+    # 第一步：使用 Whisper 转录
+    result = transcribe_video(video_path, model_size, language)
+    
+    # 获取检测到的语言
+    detected_lang = result['language']
+    source_lang = detected_lang
+    
+    # 第二步：保存源语言字幕
+    source_subtitle_path = os.path.join(output_dir, f"{base_name}_{detected_lang.lower()}.srt")
+    generate_english_subtitle(result, source_subtitle_path)
+    
+    # 第三步：根据需要生成中文字幕
+    if subtitle_type == "bilingual":
+        bilingual_subtitle_path = os.path.join(output_dir, f"{base_name}_bilingual.srt")
+        generate_bilingual_subtitle(result, bilingual_subtitle_path, translator, source_lang)
+    elif subtitle_type == "chinese":
+        chinese_subtitle_path = os.path.join(output_dir, f"{base_name}_chinese.srt")
+        generate_chinese_only_subtitle(result, chinese_subtitle_path, translator, source_lang)
+    
+    # 保存转录文本
+    transcript_path = os.path.join(output_dir, f"{base_name}_transcript.txt")
+    save_transcript(result, transcript_path)
+    
+    print("\n" + "=" * 60)
+    print("所有任务完成!")
+    print("=" * 60)
+    print(f"\n生成的文件:")
+    print(f"  - {base_name}_{detected_lang.lower()}.srt ({detected_lang}字幕)")
+    if subtitle_type == "bilingual":
+        print(f"  - {base_name}_bilingual.srt (双语字幕)")
+    elif subtitle_type == "chinese":
+        print(f"  - {base_name}_chinese.srt (中文字幕)")
+    print(f"  - {base_name}_transcript.txt (转录文本)")
+    
+    return result
+
+
+def get_video_files(directory):
+    """
+    获取目录中的所有视频文件
+    
+    参数:
+        directory: 目录路径
+    
+    返回:
+        视频文件路径列表
+    """
+    video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv', '.m4v']
+    video_files = []
+    
+    for file in Path(directory).iterdir():
+        if file.is_file() and file.suffix.lower() in video_extensions:
+            video_files.append(str(file))
+    
+    return sorted(video_files)
+
+
+def batch_process_videos(
+    input_dir,
+    model_size="small",
+    output_dir=None,
+    subtitle_type="bilingual",
+    translator="google",
+    language=None
+):
+    """
+    批量处理目录中的所有视频文件
+    
+    参数:
+        input_dir: 输入目录
+        model_size: 模型大小
+        output_dir: 输出目录
+        subtitle_type: 字幕类型
+        translator: 翻译器类型
+        language: 源语言代码
+    """
+    # 获取所有视频文件
+    video_files = get_video_files(input_dir)
+    
+    if not video_files:
+        print(f"✗ 在目录 {input_dir} 中未找到视频文件")
+        return
+    
+    print(f"\n找到 {len(video_files)} 个视频文件:")
+    for i, video_file in enumerate(video_files, 1):
+        print(f"  {i}. {os.path.basename(video_file)}")
+    
+    # 设置输出目录
+    if output_dir is None:
+        output_dir = input_dir
+    
+    # 确保输出目录存在
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 批量处理
+    total_files = len(video_files)
+    success_count = 0
+    failed_count = 0
+    
+    print("\n" + "=" * 60)
+    print("开始批量处理")
+    print("=" * 60)
+    
+    for i, video_path in enumerate(video_files, 1):
+        print(f"\n\n{'=' * 60}")
+        print(f"处理文件 {i}/{total_files}: {os.path.basename(video_path)}")
+        print(f"{'=' * 60}\n")
+        
+        try:
+            result = process_video_to_chinese_subtitle(
+                video_path=video_path,
+                model_size=model_size,
+                output_dir=output_dir,
+                subtitle_type=subtitle_type,
+                translator=translator,
+                language=language
+            )
+            
+            if result:
+                success_count += 1
+                print(f"\n✓ 文件 {i}/{total_files} 处理成功")
+            else:
+                failed_count += 1
+                print(f"\n✗ 文件 {i}/{total_files} 处理失败")
+        
+        except Exception as e:
+            failed_count += 1
+            print(f"\n✗ 文件 {i}/{total_files} 处理失败: {e}")
+    
+    # 输出总结
+    print("\n\n" + "=" * 60)
+    print("批量处理完成!")
+    print("=" * 60)
+    print(f"\n处理统计:")
+    print(f"  总文件数: {total_files}")
+    print(f"  成功: {success_count}")
+    print(f"  失败: {failed_count}")
+    print(f"  成功率: {success_count/total_files*100:.1f}%")
+
+
+def main():
+    """主函数"""
+    print("\n" + "=" * 60)
+    print("视频字幕批量生成工具")
+    print("=" * 60)
+    
+    # 选择处理模式
+    print("\n请选择处理模式:")
+    print("1. 单个文件处理")
+    print("2. 文件夹批量处理")
+    
+    mode_choice = input("\n请输入选项 (1-2，默认1): ").strip() or "1"
+    
+    input_path = None
+    is_batch = False
+    
+    if mode_choice == "2":
+        # 批量处理模式
+        input_dir = input("\n请输入视频文件夹路径 (默认: /Users/kanten/Downloads/test): ").strip() or "/Users/kanten/Downloads/test"
+        
+        if not os.path.isdir(input_dir):
+            print(f"✗ 错误: 目录不存在: {input_dir}")
+            return
+        
+        input_path = input_dir
+        is_batch = True
+    else:
+        # 单文件处理模式
+        video_path = input("\n请输入视频文件路径 (默认: /Users/kanten/Downloads/test/test.mkv): ").strip() or "/Users/kanten/Downloads/test/test.mkv"
+        
+        if not os.path.isfile(video_path):
+            print(f"✗ 错误: 文件不存在: {video_path}")
+            return
+        
+        input_path = video_path
+        is_batch = False
+    
+    # 选择模型大小
+    print("\n请选择模型大小:")
+    print("1. tiny (最快，质量较低)")
+    print("2. base (较快，质量中等)")
+    print("3. small (推荐，平衡速度和质量)")
+    print("4. medium (较慢，质量较高)")
+    print("5. large (最慢，质量最高)")
+    
+    model_choice = input("\n请输入选项 (1-5，默认3): ").strip() or "3"
+    
+    model_map = {
+        "1": "tiny",
+        "2": "base",
+        "3": "small",
+        "4": "medium",
+        "5": "large"
+    }
+    
+    model_size = model_map.get(model_choice, "small")
+    
+    # 选择源语言
+    print("\n请选择源语言:")
+    print("1. 英文 (English)")
+    print("2. 日文 (Japanese)")
+    print("3. 自动检测 (推荐)")
+    
+    lang_choice = input("\n请输入选项 (1-3，默认3): ").strip() or "3"
+    
+    lang_map = {
+        "1": "English",
+        "2": "Japanese",
+        "3": None
+    }
+    
+    language = lang_map.get(lang_choice, None)
+    
+    # 选择字幕类型
+    print("\n请选择字幕类型:")
+    print("1. 双语字幕 (源语言 + 中文)")
+    print("2. 纯中文字幕")
+    print("3. 纯源语言字幕")
+    
+    subtitle_choice = input("\n请输入选项 (1-3，默认1): ").strip() or "1"
+    
+    subtitle_map = {
+        "1": "bilingual",
+        "2": "chinese",
+        "3": "english"
+    }
+    
+    subtitle_type = subtitle_map.get(subtitle_choice, "bilingual")
+    
+    # 选择翻译方式
+    if subtitle_type in ["bilingual", "chinese"]:
+        print("\n请选择翻译方式:")
+        print("1. Google Translate (需要安装 googletrans)")
+        print("2. 手动翻译 (先生成源语言字幕，您可以手动翻译)")
+        
+        translator_choice = input("\n请输入选项 (1-2，默认1): ").strip() or "1"
+        
+        if translator_choice == "2":
+            translator = "manual"
+        else:
+            translator = "google"
+            
+            # 尝试安装 googletrans
+            print("\n检查翻译依赖...")
+            try:
+                import googletrans
+                print("✓ googletrans 已安装")
+            except ImportError:
+                print("✗ googletrans 未安装")
+                install = input("是否现在安装 googletrans? (y/n): ").strip().lower()
+                if install == 'y':
+                    import subprocess
+                    subprocess.run([
+                        ".venv/bin/pip", "install", "googletrans==4.0.0-rc1"
+                    ])
+                    print("✓ googletrans 安装完成")
+    else:
+        translator = None
+    
+    # 设置输出目录
+    if is_batch:
+        output_dir = input("\n请输入输出目录 (默认: 与输入目录相同，按 Enter 使用默认): ").strip()
+        if not output_dir:
+            output_dir = input_path
+    else:
+        output_dir = os.path.dirname(input_path)
+    
+    # 开始处理
+    print("\n" + "=" * 60)
+    print("开始处理")
+    print("=" * 60)
+    
+    if is_batch:
+        # 批量处理
+        batch_process_videos(
+            input_dir=input_path,
+            model_size=model_size,
+            output_dir=output_dir,
+            subtitle_type=subtitle_type,
+            translator=translator,
+            language=language
+        )
+    else:
+        # 单文件处理
+        result = process_video_to_chinese_subtitle(
+            video_path=input_path,
+            model_size=model_size,
+            output_dir=output_dir,
+            subtitle_type=subtitle_type,
+            translator=translator,
+            language=language
+        )
+        
+        if result:
+            print("\n字幕文件已生成!")
+            print("\n下一步:")
+            print("1. 在视频播放器中加载字幕文件")
+            if translator == "manual":
+                print("2. 使用翻译工具或手动编辑字幕文件")
+            print("3. 如果翻译质量不理想，可以手动调整字幕文件")
+
+
+if __name__ == "__main__":
+    main()
