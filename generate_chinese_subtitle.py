@@ -23,6 +23,28 @@ from pathlib import Path
 import json
 import time
 from datetime import datetime, timedelta
+import subprocess
+import shutil
+
+
+def check_ffmpeg():
+    """
+    检查系统是否安装了 ffmpeg
+    
+    返回:
+        bool: True 如果 ffmpeg 可用，False 否则
+    """
+    try:
+        # 尝试运行 ffmpeg -version
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
 
 
 def format_timestamp(seconds):
@@ -34,7 +56,7 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def transcribe_video(video_path, model_size="small", language=None):
+def transcribe_video(video_path, model_size="small", language=None, device=None):
     """
     使用 Whisper 转录视频
     
@@ -42,13 +64,64 @@ def transcribe_video(video_path, model_size="small", language=None):
         video_path: 视频文件路径
         model_size: 模型大小
         language: 语言代码 (None=自动检测, "English", "Japanese" 等)
+        device: 计算设备 (None=自动检测, "cuda", "cpu")
     
     返回:
         Whisper 转录结果
     """
+    # 检查 ffmpeg 是否可用
+    if not check_ffmpeg():
+        print("=" * 60)
+        print("✗ 错误: 系统中未找到 ffmpeg")
+        print("=" * 60)
+        print("\nWhisper 需要 ffmpeg 来处理音频文件。")
+        print("\n请安装 ffmpeg:")
+        if sys.platform == "win32":
+            print("  1. 下载 ffmpeg: https://www.gyan.dev/ffmpeg/builds/ffmpeg-git-full.7z")
+            print("  2. 解压到某个目录，例如: C:\\ffmpeg")
+            print("  3. 将 C:\\ffmpeg\\bin 添加到系统环境变量 PATH 中")
+            print("  4. 重启终端/命令提示符")
+        elif sys.platform == "darwin":
+            print("  运行: brew install ffmpeg")
+        else:
+            print("  运行: sudo apt install ffmpeg  # Ubuntu/Debian")
+            print("  或: sudo yum install ffmpeg    # CentOS/RHEL")
+        print("\n安装后，请重新运行此程序。")
+        print("=" * 60)
+        raise FileNotFoundError("ffmpeg 未安装或不在系统 PATH 中")
+    
+    # 检查视频文件是否存在
+    if not os.path.exists(video_path):
+        print("=" * 60)
+        print(f"✗ 错误: 视频文件不存在")
+        print("=" * 60)
+        print(f"文件路径: {video_path}")
+        print("\n请检查:")
+        print("  1. 文件路径是否正确")
+        print("  2. 文件是否已被移动或删除")
+        print("  3. 路径中是否包含特殊字符")
+        print("=" * 60)
+        raise FileNotFoundError(f"视频文件不存在: {video_path}")
+    
+    # 检查文件是否可读
+    try:
+        file_size = os.path.getsize(video_path)
+    except Exception as e:
+        print("=" * 60)
+        print(f"✗ 错误: 无法读取文件")
+        print("=" * 60)
+        print(f"文件路径: {video_path}")
+        print(f"错误信息: {e}")
+        print("\n请检查:")
+        print("  1. 文件是否被其他程序占用")
+        print("  2. 文件权限是否正确")
+        print("  3. 文件是否损坏")
+        print("=" * 60)
+        raise
+    
     print("=" * 60)
     print(f"视频文件: {video_path}")
-    print(f"文件大小: {os.path.getsize(video_path) / (1024**3):.2f} GB")
+    print(f"文件大小: {file_size / (1024**3):.2f} GB")
     print(f"模型大小: {model_size}")
     if language:
         print(f"指定语言: {language}")
@@ -56,9 +129,22 @@ def transcribe_video(video_path, model_size="small", language=None):
         print("语言检测: 自动")
     print("=" * 60)
     
+    # 自动检测最佳设备
+    if device is None:
+        import torch
+        if torch.cuda.is_available():
+            device = "cuda"
+            print(f"\n✓ 检测到CUDA可用，将使用GPU加速")
+            print(f"  GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = "cpu"
+            print(f"\n⚠️  CUDA不可用，将使用CPU处理（速度较慢）")
+    
+    print(f"使用设备: {device}")
+    
     # 加载模型
     print(f"\n正在加载 Whisper 模型: {model_size}...")
-    model = whisper.load_model(model_size)
+    model = whisper.load_model(model_size, device=device)
     print("✓ 模型加载完成")
     
     # 转录视频
@@ -91,7 +177,8 @@ def transcribe_video(video_path, model_size="small", language=None):
     
     # 准备转录参数
     transcribe_kwargs = {
-        "word_timestamps": True
+        "word_timestamps": True,
+        "fp16": device == "cuda"  # 仅在CUDA上使用FP16加速
     }
     if language:
         transcribe_kwargs["language"] = language
@@ -346,7 +433,8 @@ def process_video_to_chinese_subtitle(
     output_dir=None,
     subtitle_type="bilingual",
     translator="google",
-    language=None
+    language=None,
+    device=None
 ):
     """
     处理视频，生成中文字幕
@@ -358,6 +446,7 @@ def process_video_to_chinese_subtitle(
         subtitle_type: 字幕类型 ("bilingual" 双语, "chinese" 纯中文, "english" 纯英文)
         translator: 翻译器类型 ("google", "manual")
         language: 源语言代码 (None=自动检测, "English", "Japanese" 等)
+        device: 计算设备 (None=自动检测, "cuda", "cpu")
     """
     
     # 检查文件是否存在
@@ -376,7 +465,7 @@ def process_video_to_chinese_subtitle(
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     
     # 第一步：使用 Whisper 转录
-    result = transcribe_video(video_path, model_size, language)
+    result = transcribe_video(video_path, model_size, language, device)
     
     # 获取检测到的语言
     detected_lang = result['language']
@@ -426,7 +515,8 @@ def get_video_files(directory):
     video_files = []
     
     for file in Path(directory).iterdir():
-        if file.is_file() and file.suffix.lower() in video_extensions:
+        # 跳过以"."开头的文件（如 ._filename.mp4）
+        if file.is_file() and file.suffix.lower() in video_extensions and not file.name.startswith('.'):
             video_files.append(str(file))
     
     return sorted(video_files)
@@ -438,7 +528,8 @@ def batch_process_videos(
     output_dir=None,
     subtitle_type="bilingual",
     translator="google",
-    language=None
+    language=None,
+    device=None
 ):
     """
     批量处理目录中的所有视频文件
@@ -450,6 +541,7 @@ def batch_process_videos(
         subtitle_type: 字幕类型
         translator: 翻译器类型
         language: 源语言代码
+        device: 计算设备 (None=自动检测, "cuda", "cpu")
     """
     # 获取所有视频文件
     video_files = get_video_files(input_dir)
@@ -484,13 +576,21 @@ def batch_process_videos(
         print(f"{'=' * 60}\n")
         
         try:
+            # 在开始处理前再次检查文件是否存在
+            if not os.path.exists(video_path):
+                print(f"✗ 错误: 文件不存在: {video_path}")
+                print(f"  该文件可能已被移动或删除")
+                failed_count += 1
+                continue
+            
             result = process_video_to_chinese_subtitle(
                 video_path=video_path,
                 model_size=model_size,
                 output_dir=output_dir,
                 subtitle_type=subtitle_type,
                 translator=translator,
-                language=language
+                language=language,
+                device=device
             )
             
             if result:
@@ -500,9 +600,23 @@ def batch_process_videos(
                 failed_count += 1
                 print(f"\n✗ 文件 {i}/{total_files} 处理失败")
         
+        except FileNotFoundError as e:
+            failed_count += 1
+            print(f"\n✗ 文件 {i}/{total_files} 处理失败: 文件未找到")
+            print(f"  错误详情: {e}")
+        except subprocess.CalledProcessError as e:
+            failed_count += 1
+            print(f"\n✗ 文件 {i}/{total_files} 处理失败: 外部程序错误")
+            print(f"  这通常是因为 ffmpeg 未能正确处理该文件")
+            print(f"  错误详情: {e}")
         except Exception as e:
             failed_count += 1
-            print(f"\n✗ 文件 {i}/{total_files} 处理失败: {e}")
+            print(f"\n✗ 文件 {i}/{total_files} 处理失败: {type(e).__name__}")
+            print(f"  错误详情: {e}")
+            # 显示完整的错误堆栈，便于调试
+            import traceback
+            print(f"\n详细错误信息:")
+            traceback.print_exc()
     
     # 输出总结
     print("\n\n" + "=" * 60)
@@ -559,15 +673,17 @@ def main():
     print("3. small (推荐，平衡速度和质量)")
     print("4. medium (较慢，质量较高)")
     print("5. large (最慢，质量最高)")
+    print("6. turbo (强烈推荐，速度快且质量好)")
     
-    model_choice = input("\n请输入选项 (1-5，默认3): ").strip() or "3"
+    model_choice = input("\n请输入选项 (1-6，默认3): ").strip() or "3"
     
     model_map = {
         "1": "tiny",
         "2": "base",
         "3": "small",
         "4": "medium",
-        "5": "large"
+        "5": "large",
+        "6": "turbo"
     }
     
     model_size = model_map.get(model_choice, "small")
@@ -627,8 +743,11 @@ def main():
                 install = input("是否现在安装 googletrans? (y/n): ").strip().lower()
                 if install == 'y':
                     import subprocess
+                    import sys
+                    # 使用当前Python环境的pip
+                    pip_path = sys.executable.replace("python.exe", "pip.exe") if sys.platform == "win32" else "pip"
                     subprocess.run([
-                        ".venv/bin/pip", "install", "googletrans==4.0.0-rc1"
+                        pip_path, "install", "googletrans==4.0.0-rc1"
                     ])
                     print("✓ googletrans 安装完成")
     else:
@@ -665,7 +784,8 @@ def main():
             output_dir=output_dir,
             subtitle_type=subtitle_type,
             translator=translator,
-            language=language
+            language=language,
+            device=None  # 自动检测最佳设备
         )
         
         if result:
