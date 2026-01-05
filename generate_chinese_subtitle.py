@@ -56,7 +56,7 @@ def format_timestamp(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def transcribe_video(video_path, model_size="small", language=None, device=None):
+def transcribe_video(video_path, model_size="small", language=None, device=None, time_limit=None):
     """
     使用 Whisper 转录视频
     
@@ -65,6 +65,7 @@ def transcribe_video(video_path, model_size="small", language=None, device=None)
         model_size: 模型大小
         language: 语言代码 (None=自动检测, "English", "Japanese" 等)
         device: 计算设备 (None=自动检测, "cuda", "cpu")
+        time_limit: 时间限制（秒），None=无限制
     
     返回:
         Whisper 转录结果
@@ -183,7 +184,44 @@ def transcribe_video(video_path, model_size="small", language=None, device=None)
     if language:
         transcribe_kwargs["language"] = language
     
-    result = model.transcribe(video_path, **transcribe_kwargs)
+    # 如果有时间限制，使用线程来限制处理时间
+    if time_limit:
+        import threading
+        result_container = [None]
+        exception_container = [None]
+        
+        def transcribe_with_timeout():
+            try:
+                result_container[0] = model.transcribe(video_path, **transcribe_kwargs)
+            except Exception as e:
+                exception_container[0] = e
+        
+        transcribe_thread = threading.Thread(target=transcribe_with_timeout)
+        transcribe_thread.start()
+        transcribe_thread.join(timeout=time_limit)
+        
+        if transcribe_thread.is_alive():
+            print(f"\n⚠️  已达到时间限制 ({format_time(time_limit)})，停止处理")
+            # 返回部分结果（如果有的话）
+            if result_container[0] is not None:
+                result = result_container[0]
+                # 过滤掉超过时间限制的片段
+                result['segments'] = [s for s in result['segments'] if s['end'] <= time_limit]
+                if not result['segments']:
+                    print("⚠️  未能在时间限制内处理任何音频片段")
+            else:
+                # 创建一个空结果
+                result = {
+                    'language': 'unknown',
+                    'segments': [],
+                    'text': ''
+                }
+        else:
+            if exception_container[0]:
+                raise exception_container[0]
+            result = result_container[0]
+    else:
+        result = model.transcribe(video_path, **transcribe_kwargs)
     
     # 停止心跳线程
     stop_heartbeat.set()
@@ -191,9 +229,16 @@ def transcribe_video(video_path, model_size="small", language=None, device=None)
     
     elapsed = time.time() - start_time
     print(f"\n✓ 转录完成! (用时: {format_time(elapsed)})")
+    
+    if time_limit and result['segments']:
+        print(f"⚠️  注意: 仅处理了前 {format_time(result['segments'][-1]['end'])} 的音频")
+    
     print(f"检测到的语言: {result['language']}")
-    print(f"总时长: {result['segments'][-1]['end']:.2f} 秒")
+    if result['segments']:
+        print(f"处理时长: {result['segments'][-1]['end']:.2f} 秒")
     print(f"分段数量: {len(result['segments'])}")
+    else:
+        print("分段数量: 0 (无有效片段)")
     
     return result
 
@@ -465,7 +510,8 @@ def process_video_to_chinese_subtitle(
     base_name = os.path.splitext(os.path.basename(video_path))[0]
     
     # 第一步：使用 Whisper 转录
-    result = transcribe_video(video_path, model_size, language, device)
+    # 传递 time_limit 参数（如果有的话）
+    result = transcribe_video(video_path, model_size, language, device, time_limit)
     
     # 获取检测到的语言
     detected_lang = result['language']
@@ -657,7 +703,7 @@ def main():
         is_batch = True
     else:
         # 单文件处理模式
-        video_path = input("\n请输入视频文件路径 (默认: /Users/kanten/Downloads/test/test.mkv): ").strip() or "/Users/kanten/Downloads/test/test.mkv"
+        video_path = input("\n请输入视频文件路径 (默认: /Users/kanten/Downloads/0102/needsrt/ABF-289-uncensored-nyap2p.com.mp4): ").strip() or "/Users/kanten/Downloads/0102/needsrt/ABF-289-uncensored-nyap2p.com.mp4"
         
         if not os.path.isfile(video_path):
             print(f"✗ 错误: 文件不存在: {video_path}")
@@ -665,6 +711,14 @@ def main():
         
         input_path = video_path
         is_batch = False
+        
+        # 询问是否限制处理时间（用于测试）
+        print("\n是否限制处理时间用于快速测试？")
+        print("1. 是，仅处理前5分钟")
+        print("2. 否，处理完整视频（默认）")
+        
+        time_limit_choice = input("\n请输入选项 (1-2，默认2): ").strip() or "2"
+        use_time_limit = time_limit_choice == "1"
     
     # 选择模型大小
     print("\n请选择模型大小:")
