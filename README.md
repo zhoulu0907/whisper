@@ -150,6 +150,102 @@ result = whisper.decode(model, mel, options)
 print(result.text)
 ```
 
+## Video Subtitle Generation
+
+This repository includes tools for generating subtitles from videos with automatic translation to Chinese.
+
+### Features
+
+- **Single file processing**: Process individual video files
+- **Batch processing**: Process all videos in a folder at once
+- **Multi-language support**: English, Japanese, and automatic language detection
+- **Real-time progress monitoring**: Track progress during transcription, translation, and subtitle generation
+- **Automatic translation**: Uses Google Translate to translate subtitles to Chinese
+- **Multiple output formats**: Generate bilingual, Chinese-only, or source language subtitles
+
+### Installation
+
+Additional dependency for subtitle generation:
+
+```bash
+pip install googletrans==4.0.0-rc1
+```
+
+### Usage
+
+#### Interactive Mode
+
+Run the subtitle generation tool:
+
+```bash
+python generate_chinese_subtitle.py
+```
+
+Follow the prompts to:
+1. Choose processing mode (single file or batch folder)
+2. Select model size (tiny, base, small, medium, large)
+3. Choose source language (English, Japanese, or auto-detect)
+4. Select subtitle type (bilingual, Chinese-only, or source language)
+5. Choose translation method (Google Translate or manual)
+
+#### Example: Single File
+
+```bash
+python generate_chinese_subtitle.py
+```
+
+Select:
+- Processing mode: 1 (single file)
+- Video path: /path/to/video.mp4
+- Model size: 4 (medium)
+- Source language: 3 (auto-detect)
+- Subtitle type: 1 (bilingual)
+- Translation: 1 (Google Translate)
+
+#### Example: Batch Processing
+
+```bash
+python generate_chinese_subtitle.py
+```
+
+Select:
+- Processing mode: 2 (batch folder)
+- Video folder: /path/to/videos/
+- Model size: 4 (medium)
+- Source language: 3 (auto-detect)
+- Subtitle type: 1 (bilingual)
+- Translation: 1 (Google Translate)
+
+#### Supported Video Formats
+
+- MP4 (.mp4)
+- AVI (.avi)
+- MOV (.mov)
+- MKV (.mkv)
+- WebM (.webm)
+- FLV (.flv)
+- WMV (.wmv)
+- M4V (.m4v)
+
+#### Output Files
+
+For each video processed, the following files are generated:
+
+- `{filename}_english.srt` - English subtitles
+- `{filename}_japanese.srt` - Japanese subtitles (if Japanese detected)
+- `{filename}_bilingual.srt` - Bilingual subtitles (source language + Chinese)
+- `{filename}_chinese.srt` - Chinese-only subtitles
+- `{filename}_transcript.txt` - Transcript with timestamps
+
+#### Progress Monitoring
+
+The tool provides real-time progress updates:
+
+- **Transcription**: Heartbeat every 10 seconds showing elapsed time
+- **Translation**: Progress every 5 segments or 2 seconds with estimated remaining time
+- **Subtitle generation**: Progress bar with percentage and time estimates
+- **Batch processing**: Individual file progress and overall statistics
+
 ## More examples
 
 Please use the [🙌 Show and tell](https://github.com/openai/whisper/discussions/categories/show-and-tell) category in Discussions for sharing more example usages of Whisper and third-party extensions such as web demos, integrations with other tools, ports for different platforms, etc.
